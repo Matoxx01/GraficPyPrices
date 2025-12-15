@@ -15,6 +15,7 @@ def instalar_dependencias():
         'seaborn>=0.12.0',
         'scikit-learn>=1.2.0',
         'statsmodels>=0.13.0',
+        'pmdarima>=2.0.0',  # Para Auto-ARIMA
         'joblib>=1.2.0',
         'requests>=2.28.0',
         'reportlab>=4.0.0',
