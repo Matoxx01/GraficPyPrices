@@ -10,8 +10,8 @@ from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 
-# Machine Learning - Ridge Regression
-from sklearn.linear_model import Ridge
+# Machine Learning - Gradient Boosting Regressor
+from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 import joblib
 
@@ -173,8 +173,8 @@ class PreciosAnalyzer:
         return categorias_data
     
     def entrenar_modelos(self, categorias_data):
-        """Entrenar modelos Ridge Regression para cada categoría"""
-        print("\nEntrenando modelos Ridge Regression...")
+        """Entrenar modelos Gradient Boosting para cada categoría"""
+        print("\nEntrenando modelos Gradient Boosting...")
         
         for categoria, datos in categorias_data.items():
             try:
@@ -185,20 +185,44 @@ class PreciosAnalyzer:
                     print(f"  ⚠ {categoria}: Datos insuficientes para entrenar")
                     continue
                 
-                # Crear features (lag features con 12 períodos)
+                # Crear features avanzadas (lag + rolling mean + tendencia + volatilidad)
                 lag = 12
                 X = []
                 y = []
                 
                 for i in range(lag, len(serie)):
-                    X.append(serie[i-lag:i])
+                    # Features básicos (lag)
+                    features = list(serie[i-lag:i])
+                    
+                    # Media móvil (últimas 4 semanas)
+                    features.append(np.mean(serie[max(0, i-4):i]))
+                    
+                    # Diferencia (cambio desde semana anterior)
+                    features.append(serie[i-1] - serie[i-2] if i >= 2 else 0)
+                    
+                    # Tendencia (últimas 4 semanas)
+                    if i >= 4:
+                        tendencia = (serie[i-1] + serie[i-2] + serie[i-3] + serie[i-4]) / 4 - np.mean(serie[max(0, i-8):i-4])
+                        features.append(tendencia)
+                    else:
+                        features.append(0)
+                    
+                    # Volatilidad
+                    features.append(np.std(serie[max(0, i-4):i]))
+                    
+                    X.append(features)
                     y.append(serie[i])
                 
                 X = np.array(X)
                 y = np.array(y)
                 
-                # Entrenar modelo Ridge
-                modelo = Ridge(alpha=1.0)
+                # Entrenar modelo Gradient Boosting
+                modelo = GradientBoostingRegressor(
+                    n_estimators=100,
+                    max_depth=5,
+                    learning_rate=0.1,
+                    random_state=42
+                )
                 modelo.fit(X, y)
                 
                 # Calcular RMSE
@@ -212,7 +236,7 @@ class PreciosAnalyzer:
                     'lag': lag
                 }
                 
-                print(f"  ✓ {categoria}: Ridge Regression - RMSE: {rmse:.4f}")
+                print(f"  ✓ {categoria}: Gradient Boosting - RMSE: {rmse:.4f}")
                 
             except Exception as e:
                 print(f"  ✗ Error en {categoria}: {e}")
@@ -235,14 +259,33 @@ class PreciosAnalyzer:
                 # Generar predicciones
                 steps = meses_adelante * 4  # Aproximadamente 4 semanas por mes
                 
-                # Usar los últimos 'lag' valores como entrada inicial
+                # Usar los últimos valores como entrada inicial
                 secuencia_actual = serie_completa[-lag:].copy()
                 predicciones_list = []
                 
-                # Predicción iterativa
+                # Predicción iterativa con features avanzadas
                 for _ in range(steps):
+                    # Crear features igual como en el entrenamiento
+                    features = list(secuencia_actual)
+                    
+                    # Media móvil (últimas 4 semanas)
+                    features.append(np.mean(secuencia_actual[-4:]))
+                    
+                    # Diferencia (cambio desde semana anterior)
+                    features.append(secuencia_actual[-1] - secuencia_actual[-2] if len(secuencia_actual) >= 2 else 0)
+                    
+                    # Tendencia (últimas 4 semanas)
+                    if len(secuencia_actual) >= 4:
+                        tendencia = (secuencia_actual[-1] + secuencia_actual[-2] + secuencia_actual[-3] + secuencia_actual[-4]) / 4 - np.mean(secuencia_actual[-8:-4] if len(secuencia_actual) >= 8 else secuencia_actual[:-4])
+                        features.append(tendencia)
+                    else:
+                        features.append(0)
+                    
+                    # Volatilidad
+                    features.append(np.std(secuencia_actual[-4:]))
+                    
                     # Predecir siguiente valor
-                    next_pred = modelo.predict(secuencia_actual.reshape(1, -1))[0]
+                    next_pred = modelo.predict(np.array([features]))[0]
                     predicciones_list.append(next_pred)
                     
                     # Actualizar secuencia
@@ -274,7 +317,112 @@ class PreciosAnalyzer:
         self.predictions = predicciones
         return predicciones
     
+    def format_fecha_grafico(self, fecha):
+        """Formatear fecha para gráficos en formato Mes-Día"""
+        meses = {
+            'January': 'Enero', 'February': 'Febrero', 'March': 'Marzo',
+            'April': 'Abril', 'May': 'Mayo', 'June': 'Junio',
+            'July': 'Julio', 'August': 'Agosto', 'September': 'Septiembre',
+            'October': 'Octubre', 'November': 'Noviembre', 'December': 'Diciembre'
+        }
+        fecha_obj = pd.Timestamp(fecha)
+        mes_ing = fecha_obj.strftime('%B')
+        mes_esp = meses.get(mes_ing, mes_ing)
+        dia = fecha_obj.strftime('%d').lstrip('0')  # Eliminar cero inicial
+        return f"{mes_esp}-{dia}"
+    
+    def crear_formateador_fecha(self):
+        """Crear formateador personalizado para fechas"""
+        from matplotlib.ticker import FuncFormatter
+        def formato_fecha(x, pos):
+            fecha = mdates.num2date(x)
+            return self.format_fecha_grafico(fecha)
+        return FuncFormatter(formato_fecha)
+    
     def calcular_ultimos_30_dias(self, categorias_data):
+        """Obtener datos de últimos 30 días"""
+        ultimos_30 = {}
+        
+        for categoria, datos in categorias_data.items():
+            fecha_max = datos['Fecha'].max()
+            fecha_inicio = fecha_max - timedelta(days=30)
+            
+            datos_30 = datos[(datos['Fecha'] >= fecha_inicio) & (datos['Fecha'] <= fecha_max)]
+            ultimos_30[categoria] = datos_30
+        
+        return ultimos_30
+    
+    def generar_grafico_general(self, categorias_data):
+        """Generar gráfico general de precios promedio trimestral"""
+        print("Generando gráfico general trimestral...")
+        
+        try:
+            # Combinar todos los datos
+            todos_datos = pd.DataFrame()
+            for categoria, datos in categorias_data.items():
+                todos_datos = pd.concat([todos_datos, datos[['Fecha', 'Precio promedio']]], ignore_index=True)
+            
+            # Agrupar por fecha y calcular promedio general
+            datos_promedio = todos_datos.groupby('Fecha')['Precio promedio'].mean().reset_index()
+            datos_promedio = datos_promedio.sort_values('Fecha')
+            
+            # Agrupar por trimestre (cada 3 meses)
+            datos_promedio['Trimestre'] = datos_promedio['Fecha'].dt.to_period('Q')
+            datos_trimestral = datos_promedio.groupby('Trimestre')['Precio promedio'].agg(['mean', 'min', 'max']).reset_index()
+            datos_trimestral['Trimestre_str'] = datos_trimestral['Trimestre'].astype(str)
+            
+            # Crear figura
+            fig, ax = plt.subplots(figsize=(14, 6))
+            
+            # Gráfico de línea con área
+            ax.plot(range(len(datos_trimestral)), datos_trimestral['mean'], 
+                   marker='o', linestyle='-', linewidth=2.5, label='Precio Promedio', 
+                   color='#2E86AB', markersize=6)
+            
+            # Área de rango (min-max)
+            ax.fill_between(range(len(datos_trimestral)), 
+                           datos_trimestral['min'], 
+                           datos_trimestral['max'], 
+                           alpha=0.2, color='#2E86AB', label='Rango (Min-Max)')
+            
+            # Configuración - Eje X por años
+            ax.set_xlabel('Año', fontsize=12, fontweight='bold')
+            ax.set_ylabel('Precio Promedio ($)', fontsize=12, fontweight='bold')
+            ax.set_title('Evolución de Precios Promedio por Trimestre (2008-2025)', 
+                        fontsize=14, fontweight='bold', pad=20)
+            
+            # Obtener posiciones de cambio de año
+            años = datos_trimestral['Trimestre'].dt.year.unique()
+            posiciones_años = []
+            etiquetas_años = []
+            
+            for año in años:
+                idx_primer_trimestre = datos_trimestral[datos_trimestral['Trimestre'].dt.year == año].index.min()
+                posiciones_años.append(idx_primer_trimestre)
+                etiquetas_años.append(str(año))
+            
+            ax.set_xticks(posiciones_años)
+            ax.set_xticklabels(etiquetas_años, rotation=45, ha='right')
+            ax.legend(loc='best', fontsize=11)
+            ax.grid(True, alpha=0.3, linestyle='--')
+            
+            # Mejorar apariencia
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            
+            plt.tight_layout()
+            
+            # Guardar en archivo temporal
+            grafico_path = os.path.join(self.temp_dir, 'grafico_general_trimestral.png')
+            plt.savefig(grafico_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            print(f"  ✓ Gráfico general generado: {len(datos_trimestral)} trimestres")
+            return grafico_path
+            
+        except Exception as e:
+            print(f"  ✗ Error generando gráfico general: {e}")
+            return None
         """Obtener datos de últimos 30 días"""
         ultimos_30 = {}
         
@@ -300,6 +448,9 @@ class PreciosAnalyzer:
         
         graficos_paths = []
         
+        # Generar gráfico general trimestral
+        grafico_general = self.generar_grafico_general(categorias_data)
+        
         # Procesar cada categoría
         for categoria in sorted(self.predictions.keys()):
             try:
@@ -322,7 +473,7 @@ class PreciosAnalyzer:
                 ax1.set_ylabel('Precio ($)', fontsize=11)
                 ax1.legend(loc='best')
                 ax1.grid(True, alpha=0.3)
-                ax1.xaxis.set_major_formatter(DateFormatter('%d-%m'))
+                ax1.xaxis.set_major_formatter(self.crear_formateador_fecha())
                 plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45)
                 
                 # Gráfico 2: Predicciones vs Histórico (6 meses) + Backtest (3 meses pasados)
@@ -357,9 +508,23 @@ class PreciosAnalyzer:
                     # Hacer predicciones para cada punto en todo el período histórico
                     for i in range(idx_inicio_backtest, len(serie_completa)):
                         if i >= lag:
-                            # Usar los 12 períodos anteriores para predecir
-                            X_test = serie_completa[i-lag:i].reshape(1, -1)
-                            pred = self.models[categoria]['modelo'].predict(X_test)[0]
+                            # Usar los 12 períodos anteriores para crear features
+                            ventana = serie_completa[i-lag:i]
+                            
+                            # Crear features igual como en el entrenamiento
+                            features = list(ventana)
+                            features.append(np.mean(ventana[-4:]))
+                            features.append(ventana[-1] - ventana[-2] if len(ventana) >= 2 else 0)
+                            
+                            if len(ventana) >= 4:
+                                tendencia = (ventana[-1] + ventana[-2] + ventana[-3] + ventana[-4]) / 4 - np.mean(ventana[-8:-4] if len(ventana) >= 8 else ventana[:-4])
+                                features.append(tendencia)
+                            else:
+                                features.append(0)
+                            
+                            features.append(np.std(ventana[-4:]))
+                            
+                            pred = self.models[categoria]['modelo'].predict(np.array([features]))[0]
                             predicciones_backtest.append(pred)
                             fechas_backtest.append(fechas_historicas[i])
                     
@@ -386,7 +551,7 @@ class PreciosAnalyzer:
                 ax2.set_xlabel('Fecha', fontsize=11)
                 ax2.legend(loc='best', fontsize=9)
                 ax2.grid(True, alpha=0.3)
-                ax2.xaxis.set_major_formatter(DateFormatter('%d-%m'))
+                ax2.xaxis.set_major_formatter(self.crear_formateador_fecha())
                 plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
                 
                 plt.tight_layout()
@@ -402,7 +567,7 @@ class PreciosAnalyzer:
                 print(f"  ✗ Error generando gráfico para {categoria}: {e}")
         
         # Crear PDF
-        self.crear_pdf_reporte(graficos_paths, categorias_data)
+        self.crear_pdf_reporte(graficos_paths, categorias_data, grafico_general)
         
         # Limpiar archivos temporales
         if self.temp_dir and os.path.exists(self.temp_dir):
@@ -410,7 +575,7 @@ class PreciosAnalyzer:
         
         return graficos_paths
     
-    def crear_pdf_reporte(self, graficos_paths, categorias_data):
+    def crear_pdf_reporte(self, graficos_paths, categorias_data, grafico_general):
         """Crear PDF con todos los gráficos y análisis"""
         print("\nCreando PDF del reporte...")
         
@@ -451,7 +616,7 @@ class PreciosAnalyzer:
                 ['Métrica', 'Valor'],
                 ['Período de Datos', f"{self.data['Fecha'].min().strftime('%d/%m/%Y')} - {self.data['Fecha'].max().strftime('%d/%m/%Y')}"],
                 ['Categorías Analizadas', f"{len(self.predictions)}"],
-                ['Modelo de Predicción', 'Ridge Regression'],
+                ['Modelo de Predicción', 'Gradient Boosting Regressor'],
                 ['Horizonte de Predicción', '6 meses'],
                 ['Total de Registros', f"{len(self.data):,}"],
             ]
@@ -472,6 +637,25 @@ class PreciosAnalyzer:
             
             story.append(summary_table)
             story.append(Spacer(1, 0.3*inch))
+            
+            # Agregar gráfico general trimestral
+            if grafico_general and os.path.exists(grafico_general):
+                story.append(PageBreak())
+                story.append(Paragraph("Evolución General de Precios", styles['Heading2']))
+                story.append(Spacer(1, 0.2*inch))
+                
+                img_general = Image(grafico_general, width=9*inch, height=4.5*inch)
+                story.append(img_general)
+                story.append(Spacer(1, 0.2*inch))
+                
+                desc_general = Paragraph(
+                    "<b>Análisis Trimestral:</b> Este gráfico muestra la evolución del precio promedio general "
+                    "de todos los productos básicos durante el período 2008-2025, agrupado por trimestres. "
+                    "El área sombreada representa el rango mínimo-máximo de variación en cada trimestre. "
+                    "Esta visualización permite identificar tendencias generales, estacionalidad y cambios significativos en los precios.",
+                    styles['Normal']
+                )
+                story.append(desc_general)
             
             # Agregar gráficos
             for categoria, grafico_path in sorted(graficos_paths):
@@ -517,32 +701,27 @@ class PreciosAnalyzer:
             <b>Metodología:</b><br/>
             • Se consolidaron {len(self.data):,} registros de precios de productos básicos.<br/>
             • Los datos se agruparon por "Tipo de punto monitoreo" (categoría) y fecha, calculando el precio promedio.<br/>
-            • Se entrenó un modelo Ridge Regression con features de lag (12 períodos) para capturar patrones temporales.<br/>
+            • Se entrenó un modelo Gradient Boosting Regressor con features avanzadas (lag, media móvil, tendencia, volatilidad).<br/>
             • Las predicciones se generaron para un horizonte de 6 meses con intervalo de confianza del 95%.<br/><br/>
-            
-            <b>Ventajas del Ridge Regression:</b><br/>
-            • <b>Mejor precisión:</b> Supera a ARIMA y otros modelos en la mayoría de categorías.<br/>
-            • <b>Captura de dependencias:</b> Las features de lag permiten detectar patrones de corto plazo.<br/>
-            • <b>Robustez:</b> Maneja bien datos con tendencias y variaciones estacionales.<br/>
-            • <b>Velocidad:</b> Mucho más rápido de entrenar que modelos complejos como ARIMA con búsqueda automática.<br/><br/>
             
             <b>Interpretación de Gráficos:</b><br/>
             • Gráfico Superior: Precios de los últimos 30 días con rango de variación (mínimo-máximo).<br/>
-            • Gráfico Inferior: Histórico de 6 meses + predicciones del modelo Ridge Regression. 
-            La región sombreada es el intervalo de incertidumbre del 95%.<br/><br/>
+            • Gráfico Inferior: Histórico de 6 meses + predicciones del modelo Gradient Boosting. 
+            La línea naranja muestra qué hubiera predicho el modelo en el pasado (validación), 
+            la magenta son las predicciones futuras. La región sombreada es el intervalo de incertidumbre del 95%.<br/><br/>
             
-            <b>Modelo Ridge Regression:</b><br/>
-            Ridge es un modelo de regresión lineal regularizado que:<br/>
-            • Utiliza features históricas (lag) para predecir valores futuros<br/>
-            • Aplica regularización L2 para evitar overfitting<br/>
-            • Es interpretable y computacionalmente eficiente<br/>
-            • Proporciona predicciones suaves y confiables<br/><br/>
+            <b>Modelo Gradient Boosting Regressor:</b><br/>
+            • Ensemble de árboles de decisión que aprenden secuencialmente<br/>
+            • Cada árbol corrige los errores del árbol anterior<br/>
+            • Utiliza features avanzadas: lags, media móvil, tendencia, volatilidad<br/>
+            • Proporciona predicciones altamente precisas y confiables<br/>
+            • Parámetros: 100 estimadores, profundidad máxima 5, learning rate 0.1<br/><br/>
             
             <b>Próximos Pasos Recomendados:</b><br/>
             • Actualizar regularmente los datos con información de ODEPA.<br/>
             • Re-entrenar los modelos mensualmente con nuevos datos.<br/>
-            • Ajustar el parámetro alpha de Ridge según resultados en validación cruzada.<br/>
             • Monitorear el RMSE para detectar cambios en los patrones de precios.<br/>
+            • Considerar agregar variables externas (demanda, inflación, estacionalidad).<br/>
             """
             
             story.append(Paragraph(conclusiones, styles['Normal']))
@@ -558,7 +737,7 @@ class PreciosAnalyzer:
         """Ejecutar análisis completo"""
         print("=" * 60)
         print("ANÁLISIS DE PRECIOS CON MACHINE LEARNING")
-        print("Modelo: Ridge Regression")
+        print("Modelo: Gradient Boosting Regressor")
         print("=" * 60)
         
         # 0. Descargar/actualizar CSV desde ODEPA
